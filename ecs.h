@@ -17,6 +17,7 @@ namespace ecs {
 enum class error {
   component_already_exists,
   component_does_not_exist,
+  component_has_references,
   no_such_entity
 };
 enum class remove_policy { strict, lax };
@@ -35,6 +36,10 @@ template <typename C> struct component_pool {
   std::vector<entity> back = {};
   std::vector<size_t> forward = {};
 
+  std::vector<uint32_t> generations = {};
+  std::vector<uint32_t> refcounts = {};
+  uint32_t current_generation = 0;
+
   template <typename... Args>
   inline std::expected<void, error> add_element(entity e, Args &&...args) {
     if (e >= forward.size()) {
@@ -52,6 +57,8 @@ template <typename C> struct component_pool {
       data.emplace_back(std::forward<Args>(args)...);
     }
 
+    refcounts.push_back(0);
+    generations.push_back(current_generation++);
     return {};
   }
 
@@ -70,6 +77,9 @@ template <typename C> struct component_pool {
     } else {
       data.emplace_back(std::forward<Args>(args)...);
     }
+
+    refcounts.push_back(0);
+    generations.push_back(current_generation++);
   }
 
   inline std::expected<void, error> remove_element(entity e) {
@@ -79,6 +89,9 @@ template <typename C> struct component_pool {
     if (forward[e] == invalid_component_index) {
       return std::unexpected(error::component_does_not_exist);
     }
+    if (refcounts[forward[e]] != 0) {
+      return std::unexpected(error::component_has_references);
+    }
 
     remove_element_fast(e);
 
@@ -86,16 +99,23 @@ template <typename C> struct component_pool {
   }
 
   inline void remove_element_fast(entity e) {
-    size_t idx = forward[e];
-    size_t last_idx = back.size() - 1;
+    assert(refcounts.size() != 0 && refcounts[forward[e]] == 0);
 
-    if (idx != last_idx) {
-      std::swap(back[idx], back[last_idx]);
-      std::swap(data[idx], data[last_idx]);
+    const size_t idx = forward[e];
+
+    const size_t last = data.size() - 1;
+    if (idx != last) {
+      std::swap(data[idx], data[last]);
+      std::swap(back[idx], back[last]);
+      std::swap(generations[idx], generations[last]);
+      std::swap(refcounts[idx], refcounts[last]);
       forward[back[idx]] = idx;
     }
-    back.pop_back();
+
     data.pop_back();
+    back.pop_back();
+    generations.pop_back();
+    refcounts.pop_back();
     forward[e] = invalid_component_index;
   }
 
@@ -118,8 +138,88 @@ template <typename C> struct component_pool {
 
     return forward[e] != invalid_component_index;
   }
+
+  uint32_t get_generation(entity e) const { return generations[forward[e]]; }
 };
 } // namespace _private
+
+template <typename C> struct smart_ref {
+private:
+  _private::component_pool<C> *pool = nullptr;
+  entity e{};
+  uint32_t generation{};
+
+public:
+  smart_ref(_private::component_pool<C> *p, entity ent)
+      : pool(p), e(ent), generation(p->get_generation(ent)) {
+    ++pool->refcounts[pool->forward[e]];
+  }
+
+  ~smart_ref() {
+    if (pool && pool->has_component(e)) {
+      auto idx = pool->forward[e];
+      if (idx != pool->invalid_component_index &&
+          generation == pool->generations[idx]) {
+        --pool->refcounts[idx];
+      }
+    }
+  }
+
+  smart_ref(const smart_ref &other)
+      : pool(other.pool), e(other.e), generation(other.generation) {
+    if (pool && pool->has_component(e)) {
+      ++pool->refcounts[pool->forward[e]];
+    }
+  }
+
+  smart_ref(smart_ref &&other) noexcept
+      : pool(other.pool), e(other.e), generation(other.generation) {
+    other.pool = nullptr;
+    other.e = {};
+    other.generation = 0;
+  }
+
+  smart_ref &operator=(const smart_ref &other) {
+    if (this == &other)
+      return *this;
+    this->~smart_ref();
+    pool = other.pool;
+    e = other.e;
+    generation = other.generation;
+    if (pool && pool->has_component(e)) {
+      ++pool->refcounts[pool->forward[e]];
+    }
+    return *this;
+  }
+
+  smart_ref &operator=(smart_ref &&other) noexcept {
+    if (this != &other) {
+      this->~smart_ref(); // release current reference safely
+      pool = other.pool;
+      e = other.e;
+      generation = other.generation;
+      other.pool = nullptr;
+      other.e = {};
+      other.generation = 0;
+    }
+    return *this;
+  }
+
+  bool valid() const {
+    if (!pool || !pool->has_component(e))
+      return false;
+    auto idx = pool->forward[e];
+    return pool->generations[idx] == generation;
+  }
+
+  C &get() {
+    assert(valid());
+    return pool->get_element_fast(e);
+  }
+
+  C *operator->() { return &get(); }
+  C &operator*() { return get(); }
+};
 
 template <typename... Cs> struct ecs {
   template <safety_policy P>
@@ -130,9 +230,9 @@ template <typename... Cs> struct ecs {
   template <reference_style S, safety_policy P, typename C>
   using method_result_ref_t = std::conditional_t<
       P == safety_policy::unchecked, void,
-      std::expected<std::conditional_t<S == reference_style::raw, C &,
-                                       C & /* TODO:  make this smart ref*/>,
-                    error>>;
+      std::expected<
+          std::conditional_t<S == reference_style::raw, C &, smart_ref<C>>,
+          error>>;
 
   template <typename C, safety_policy policy = safety_policy::unchecked,
             typename... Ts>
@@ -182,13 +282,22 @@ template <typename... Cs> struct ecs {
       }
     }
 
-    _private::component_pool<C> &pool =
-        std::get<_private::component_pool<C>>(_data);
+    auto &pool = std::get<_private::component_pool<C>>(_data);
 
     if constexpr (policy == safety_policy::checked) {
-      return pool.get_element(e);
+      if constexpr (style == reference_style::raw) {
+        return pool.get_element(e);
+      } else {
+        if (!pool.has_component(e))
+          return std::unexpected(error::component_does_not_exist);
+        return smart_ref<C>{&pool, e};
+      }
     } else {
-      return pool.get_element_fast(e);
+      if constexpr (style == reference_style::raw) {
+        return pool.get_element_fast(e);
+      } else {
+        return smart_ref<C>{&pool, e};
+      }
     }
   }
 
@@ -340,16 +449,31 @@ private:
     return _smallest_pool_impl(std::index_sequence_for<Ccs...>{});
   }
 
-  template <std::size_t... I>
-  auto &_smallest_pool_impl(std::index_sequence<I...>) {
-    auto *min_pool = &std::get<0>(_pools);
-    size_t min_size = std::get<0>(_pools).back.size();
-    ((std::get<I>(_pools).back.size() < min_size
-          ? (min_size = std::get<I>(_pools).back.size(),
-             min_pool = &std::get<I>(_pools))
-          : 0),
-     ...);
-    return *min_pool;
+  template <size_t... Is>
+  auto &_smallest_pool_impl(std::index_sequence<Is...>) {
+    constexpr size_t N = sizeof...(Is);
+    size_t sizes[N] = {std::get<Is>(_pools).back.size()...};
+
+    size_t min_index = 0;
+    size_t min_size = sizes[0];
+    for (size_t i = 1; i < N; ++i) {
+      if (sizes[i] < min_size) {
+        min_size = sizes[i];
+        min_index = i;
+      }
+    }
+
+    auto *result = ([&]<size_t... Js>(std::index_sequence<Js...>) {
+      using pool_ptr_t = void *;
+      pool_ptr_t ptr = nullptr;
+      ((ptr = (Js == min_index ? static_cast<pool_ptr_t>(&std::get<Js>(_pools))
+                               : ptr)),
+       ...);
+      return ptr;
+    })(std::index_sequence_for<Ccs...>{});
+
+    return *static_cast<
+        std::remove_reference_t<decltype(std::get<0>(_pools))> *>(result);
   }
 
   std::tuple<Ccs &...> _get_components(entity e) const {

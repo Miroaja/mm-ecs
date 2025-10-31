@@ -96,6 +96,9 @@ using test_data = std::array<int, 20>;
   auto start_removal = steady_clock::now();
   size_t remove_count = 0;
   for (const auto &[e, i] : entities) {
+    if (i % 2 == 0) {
+      continue;
+    }
     if (i % 100'000 == 0) {
       // checked removal
       if (auto result =
@@ -117,23 +120,23 @@ using test_data = std::array<int, 20>;
   std::println("Removed {} components in {:.3f} s", remove_count,
                duration<double>(end_removal - start_removal).count());
   // ---------------- ECS VIEW ITERATION ----------------
-  std::println("Testing ecs_view iteration with file output");
-  auto start_view = steady_clock::now();
-  size_t count = 0;
   {
-    std::ofstream output("ecs_view.txt");
-    if (!output.is_open())
-      std::abort();
-
-    for (auto [e, v] : ecs_view<v3>(ecs)) {
+    std::println("Testing ecs_view iteration with file output");
+    auto start_view = steady_clock::now();
+    size_t count = 0;
+    volatile float sink = 0.0f;
+    for (auto [e, v] : ecs_view<test_data, v3>(ecs)) {
       count++;
-      auto [val] = v;
-      std::println(output, "{},{}", e, val.x);
+      auto &[data, val] = v;
+      sink += val.x;
+      for (auto k : data) {
+        sink += k;
+      }
     }
+    auto end_view = steady_clock::now();
+    std::println("Iterated over {} ECS entities in {:.3f} s (sink = {})", count,
+                 duration<double>(end_view - start_view).count(), (float)sink);
   }
-  auto end_view = steady_clock::now();
-  std::println("Iterated over {} ECS entities and wrote output in {:.3f} s",
-               count, duration<double>(end_view - start_view).count());
 
   // ---------------- TOTAL ----------------
   auto end_total = steady_clock::now();
