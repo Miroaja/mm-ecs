@@ -1,4 +1,4 @@
-HEADER = rational.hpp
+HEADER = ecs.hpp
 
 PREFIX ?= /usr/local
 INCLUDEDIR = $(PREFIX)/include/mm
