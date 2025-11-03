@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
 #include <print>
 #include <vector>
 
@@ -125,7 +124,7 @@ using test_data = std::array<int, 20>;
     auto start_view = steady_clock::now();
     size_t count = 0;
     volatile float sink = 0.0f;
-    for (auto [e, v] : ecs_view<test_data, v3>(ecs)) {
+    for (auto [e, v] : view<test_data, v3>(ecs)) {
       count++;
       auto &[data, val] = v;
       sink += val.x;
@@ -136,6 +135,103 @@ using test_data = std::array<int, 20>;
     auto end_view = steady_clock::now();
     std::println("Iterated over {} ECS entities in {:.3f} s (sink = {})", count,
                  duration<double>(end_view - start_view).count(), (float)sink);
+  }
+
+  // ---------------- SMART REF FUNCTIONAL TEST ----------------
+  {
+    std::println("Testing smart_ref correctness and performance");
+    auto start_ref_tests = steady_clock::now();
+
+    entity test_e = ecs.add_entity();
+    v3 init_v{1.0f, 2.0f, 3.0f};
+    ecs.add_component<v3, safety_policy::unchecked>(test_e, init_v);
+
+    // baseline reference count
+    auto &pool = std::get<mm::ecs::_private::component_pool<v3>>(ecs._data);
+    size_t idx = pool.forward[test_e];
+    auto before_refs = pool.refcounts[idx];
+
+    // Construct
+    {
+      smart_ref<v3> r1(&pool, test_e);
+      assert(r1.valid());
+      assert(pool.refcounts[idx] == before_refs + 1);
+
+      // Copy
+      {
+        smart_ref<v3> r2 = r1;
+        assert(pool.refcounts[idx] == before_refs + 2);
+        assert(&r1.get() == &r2.get());
+      }
+
+      // After copy destroyed
+      assert(pool.refcounts[idx] == before_refs + 1);
+
+      // Move
+      {
+        smart_ref<v3> r3 = std::move(r1);
+        assert(r3.valid());
+        assert(pool.refcounts[idx] == before_refs + 1);
+      }
+
+      // After move destroyed
+      assert(pool.refcounts[idx] == before_refs);
+    }
+
+    // After all destroyed
+    assert(pool.refcounts[idx] == before_refs);
+
+    // Mutate via ref
+    {
+      smart_ref<v3> r4(&pool, test_e);
+      r4->x += 10.0f;
+      r4->y += 20.0f;
+      r4->z += 30.0f;
+
+      auto &val = ecs.get_component<v3>(test_e);
+      assert(std::fabs(val.x - 11.0f) < 1e-5);
+      assert(std::fabs(val.y - 22.0f) < 1e-5);
+      assert(std::fabs(val.z - 33.0f) < 1e-5);
+    }
+
+    auto end_ref_tests = steady_clock::now();
+    std::println("Smart_ref correctness tests completed in {:.6f} s",
+                 duration<double>(end_ref_tests - start_ref_tests).count());
+  }
+
+  // ---------------- SMART REF PERFORMANCE TEST ----------------
+  {
+    std::println("Testing smart_ref performance");
+    auto start_perf = steady_clock::now();
+
+    // Precreate references
+    std::vector<smart_ref<v3>> refs;
+    refs.reserve(ENTITY_COUNT);
+
+    for (const auto &[e, i] : entities) {
+      if (ecs.has_component<v3>(e)) {
+        refs.emplace_back(ecs.get_component<v3, reference_style::stable>(e));
+      }
+    }
+
+    volatile float sink = 0.0f;
+
+    // Timed dereference loop
+    auto start_access = steady_clock::now();
+    for (auto &r : refs) {
+      if (r.valid()) {
+        sink += r->x + r->y + r->z;
+      }
+    }
+    auto end_access = steady_clock::now();
+
+    refs.clear();
+    auto end_perf = steady_clock::now();
+
+    std::println(
+        "smart_ref access loop: {:.6f} s, total test: {:.6f} s (sink={:.3})",
+        duration<double>(end_access - start_access).count(),
+        duration<double>(end_perf - start_perf).count(), (float)sink);
   }
 
   // ---------------- TOTAL ----------------
