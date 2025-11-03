@@ -13,8 +13,8 @@ struct v3 {
 using test_data = std::array<int, 20>;
 
 [[noreturn]] int main() {
-  using namespace std::chrono;
   using namespace mm::ecs;
+  using namespace std::chrono;
 
   std::srand(1234);
 
@@ -147,7 +147,7 @@ using test_data = std::array<int, 20>;
     ecs.add_component<v3, safety_policy::unchecked>(test_e, init_v);
 
     // baseline reference count
-    auto &pool = std::get<mm::ecs::_private::component_pool<v3>>(ecs._data);
+    auto &pool = ecs.pool_of<v3>();
     size_t idx = pool.forward[test_e];
     auto before_refs = pool.refcounts[idx];
 

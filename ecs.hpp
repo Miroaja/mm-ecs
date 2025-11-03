@@ -1,13 +1,9 @@
 #pragma once
 #include <algorithm>
-#include <any>
-#include <array>
 #include <cassert>
 #include <cstdint>
 #include <expected>
-#include <functional>
 #include <limits>
-#include <print>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -46,22 +42,16 @@ template <typename C> struct component_pool {
       return std::unexpected(error::component_already_exists);
     }
 
-    forward[e] = back.size();
-    back.push_back(e);
+    add_element_fast(e, std::forward<Args>(args)...);
 
-    if constexpr (sizeof...(Args) == 0) {
-      data.emplace_back();
-    } else {
-      data.emplace_back(std::forward<Args>(args)...);
-    }
-
-    refcounts.push_back(0);
     return {};
   }
 
   template <typename... Args>
   inline void add_element_fast(entity e, Args &&...args) {
-    assert(e != invalid_entity);
+    static_assert(std::is_constructible_v<C, Args &&...>,
+                  "add_element_fast(): arguments do not match any constructor "
+                  "of this component type");
     if (e >= forward.size()) {
       forward.resize(e + 1, invalid_component_index);
     }
@@ -258,7 +248,9 @@ template <typename... Cs> struct ecs {
 
   template <typename C, reference_style style = reference_style::raw,
             safety_policy policy = safety_policy::unchecked>
-  inline method_result_ref_t<style, policy, C> get_component(entity e) {
+  [[nodiscard(
+      "Unused get_component")]] inline method_result_ref_t<style, policy, C>
+  get_component(entity e) {
     if constexpr (policy == safety_policy::checked) {
       if (std::find(_entities.cbegin(), _entities.cend(), e) ==
           _entities.cend()) {
@@ -364,9 +356,16 @@ template <typename... Cs> struct ecs {
     }
   }
 
-  std::tuple<_private::component_pool<Cs>...> _data = {};
+  template <typename C> _private::component_pool<C> &pool_of() {
+    return std::get<_private::component_pool<C>>(_data);
+  }
+
+  template <typename C> const _private::component_pool<C> &pool_of() const {
+    return std::get<_private::component_pool<C>>(_data);
+  }
 
 private:
+  std::tuple<_private::component_pool<Cs>...> _data = {};
   std::vector<entity> _entities = {};
   entity _entity_counter = 0;
 
