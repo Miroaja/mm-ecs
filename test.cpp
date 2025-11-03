@@ -16,7 +16,7 @@ using test_data = std::array<int, 20>;
   using namespace std::chrono;
   using namespace mm::ecs;
 
-  std::srand(1234); // reproducible random data
+  std::srand(1234);
 
   ecs<v3, test_data> ecs;
 
@@ -204,7 +204,6 @@ using test_data = std::array<int, 20>;
     std::println("Testing smart_ref performance");
     auto start_perf = steady_clock::now();
 
-    // Precreate references
     std::vector<smart_ref<v3>> refs;
     refs.reserve(ENTITY_COUNT);
 
@@ -216,7 +215,6 @@ using test_data = std::array<int, 20>;
 
     volatile float sink = 0.0f;
 
-    // Timed dereference loop
     auto start_access = steady_clock::now();
     for (auto &r : refs) {
       if (r.valid()) {
