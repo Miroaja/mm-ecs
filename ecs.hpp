@@ -396,8 +396,8 @@ template <typename... Ccs> struct view {
         : _view(view), _index(index) {}
 
     inline iterator &operator++() {
+      _index++;
       auto &pool = _view._smallest_pool();
-      ++_index;
       _skip_non_matching(pool);
       return *this;
     }
@@ -414,7 +414,10 @@ template <typename... Ccs> struct view {
 
   private:
     inline void _skip_non_matching(auto &smallest) {
-      while (_index < smallest.back.size()) {
+      while (_index <= smallest.back.size()) {
+        if (_index == smallest.back.size()) {
+          break;
+        }
         if (_has_all(smallest.back[_index])) {
           break;
         }
