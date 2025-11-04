@@ -1,9 +1,11 @@
 #pragma once
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <print>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -91,9 +93,9 @@ template <typename C> struct component_pool {
 
     const size_t last = data.size() - 1;
     if (idx != last) {
-      std::swap(data[idx], data[last]);
-      std::swap(back[idx], back[last]);
-      std::swap(refcounts[idx], refcounts[last]);
+      std::swap<entity>(back[idx], back[last]);
+      std::swap<uint32_t>(refcounts[idx], refcounts[last]);
+      std::iter_swap(data.begin() + idx, data.begin() + last);
       forward[back[idx]] = idx;
     }
 
@@ -104,7 +106,7 @@ template <typename C> struct component_pool {
   }
 
   inline std::expected<C &, error> get_element(entity e) {
-    if (forward.size() == 0 || back.size() == 0 || forward.size() >= e) {
+    if (forward.size() == 0 || back.size() == 0 || forward.size() <= e) {
       return std::unexpected(error::component_does_not_exist);
     }
     if (forward[e] == invalid_component_index) {
@@ -116,7 +118,7 @@ template <typename C> struct component_pool {
   inline C &get_element_fast(entity e) { return data[forward[e]]; }
 
   inline bool has_component(entity e) const {
-    if (forward.size() == 0 || back.size() == 0 || forward.size() >= e) {
+    if (forward.size() == 0 || back.size() == 0 || forward.size() <= e) {
       return false;
     }
 
@@ -393,12 +395,13 @@ template <typename... Ccs> struct view {
 
   struct iterator {
     inline iterator(view<Ccs...> &view, size_t index)
-        : _view(view), _index(index) {}
+        : _view(view), _index(index) {
+      _skip_non_matching();
+    }
 
     inline iterator &operator++() {
       _index++;
-      auto &pool = _view._smallest_pool();
-      _skip_non_matching(pool);
+      _skip_non_matching();
       return *this;
     }
 
@@ -407,28 +410,49 @@ template <typename... Ccs> struct view {
     }
 
     inline std::pair<entity, std::tuple<Ccs &...>> operator*() const {
-      auto &pool = _view._smallest_pool();
-      auto e = pool.back[_index];
+      auto e = _first_matching();
+      assert(_has_all(e) == true);
       return {e, _view._get_components(e)};
     }
 
   private:
-    inline void _skip_non_matching(auto &smallest) {
-      while (_index < smallest.back.size()) {
-        if (_has_all(smallest.back[_index])) {
+    inline void _skip_non_matching() {
+      while (_index < _view._smallest_pool()) {
+        if (_has_all(_first_matching())) {
           break;
         }
         ++_index;
       }
     }
 
-    bool _has_all(entity e) {
+    bool _has_all(entity e) const {
       return _has_all_impl(e, std::index_sequence_for<Ccs...>{});
     }
 
     template <std::size_t... I>
-    bool _has_all_impl(entity e, std::index_sequence<I...>) {
+    bool _has_all_impl(entity e, std::index_sequence<I...>) const {
       return (... && std::get<I>(_view._pools).has_component(e));
+    }
+
+    entity _first_matching() const {
+      return _first_matching_impl(std::index_sequence_for<Ccs...>{});
+    }
+
+    template <size_t... Is>
+    entity _first_matching_impl(std::index_sequence<Is...>) const {
+      entity result = invalid_entity;
+
+      ((result == invalid_entity ? [&] {
+        auto& pool = std::get<Is>(_view._pools);
+        for (auto e : pool.back) {
+            if (e != invalid_entity) {
+                result = e;
+                return;
+            }
+        }
+    }() : void()), ...);
+
+      return result;
     }
 
     view<Ccs...> &_view;
@@ -436,41 +460,25 @@ template <typename... Ccs> struct view {
   };
 
   inline iterator begin() { return iterator(*this, 0); }
-  inline iterator end() {
-    auto &pool = _smallest_pool();
-    return iterator(*this, pool.back.size());
-  }
+  inline iterator end() { return iterator(*this, _smallest_pool()); }
 
 private:
-  auto &_smallest_pool() {
+  size_t _smallest_pool() {
     return _smallest_pool_impl(std::index_sequence_for<Ccs...>{});
   }
 
   template <size_t... Is>
-  auto &_smallest_pool_impl(std::index_sequence<Is...>) {
+  size_t _smallest_pool_impl(std::index_sequence<Is...>) {
     constexpr size_t N = sizeof...(Is);
     size_t sizes[N] = {std::get<Is>(_pools).back.size()...};
 
-    size_t min_index = 0;
     size_t min_size = sizes[0];
     for (size_t i = 1; i < N; ++i) {
       if (sizes[i] < min_size) {
         min_size = sizes[i];
-        min_index = i;
       }
     }
-
-    auto *result = ([&]<size_t... Js>(std::index_sequence<Js...>) {
-      using pool_ptr_t = void *;
-      pool_ptr_t ptr = nullptr;
-      ((ptr = (Js == min_index ? static_cast<pool_ptr_t>(&std::get<Js>(_pools))
-                               : ptr)),
-       ...);
-      return ptr;
-    })(std::index_sequence_for<Ccs...>{});
-
-    return *static_cast<
-        std::remove_reference_t<decltype(std::get<0>(_pools))> *>(result);
+    return min_size;
   }
 
   std::tuple<Ccs &...> _get_components(entity e) const {
