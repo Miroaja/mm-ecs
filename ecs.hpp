@@ -126,6 +126,8 @@ template <typename C> struct component_pool {
 } // namespace _private
 
 template <typename C> struct smart_ref {
+  smart_ref() : entity(invalid_entity), pool(nullptr) {}
+
   smart_ref(_private::component_pool<C> *p, entity ent) : entity(ent), pool(p) {
     ++pool->refcounts[pool->forward[entity]];
   }
@@ -148,7 +150,7 @@ template <typename C> struct smart_ref {
   smart_ref(smart_ref &&other) noexcept
       : entity(other.entity), pool(other.pool) {
     other.pool = nullptr;
-    other.entity = {};
+    other.entity = invalid_entity;
   }
 
   smart_ref &operator=(const smart_ref &other) {
@@ -165,11 +167,11 @@ template <typename C> struct smart_ref {
 
   smart_ref &operator=(smart_ref &&other) noexcept {
     if (this != &other) {
-      this->~smart_ref(); // release current reference safely
+      this->~smart_ref();
       pool = other.pool;
       entity = other.entity;
       other.pool = nullptr;
-      other.entity = {};
+      other.entity = invalid_entity;
     }
     return *this;
   }
@@ -183,6 +185,17 @@ template <typename C> struct smart_ref {
   C &get() {
     assert(valid());
     return pool->get_element_fast(entity);
+  }
+
+  void release() {
+    if (pool && pool->has_component(entity)) {
+      auto idx = pool->forward[entity];
+      if (idx != _private::invalid_component_index) {
+        --pool->refcounts[idx];
+      }
+    }
+    pool = nullptr;
+    entity = invalid_entity;
   }
 
   C *operator->() { return &get(); }
