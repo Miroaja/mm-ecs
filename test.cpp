@@ -26,6 +26,7 @@ using test_data = std::array<int, 20>;
   std::println("Adding {} entities", ENTITY_COUNT);
   auto start_total = steady_clock::now();
 
+
   // ---------------- ENTITY CREATION ----------------
   auto start_entities = steady_clock::now();
   std::vector<std::pair<entity, int>> entities;
