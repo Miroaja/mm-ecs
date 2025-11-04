@@ -104,7 +104,7 @@ template <typename C> struct component_pool {
   }
 
   inline std::expected<C &, error> get_element(entity e) {
-    if (forward.size() == 0 || back.size() == 0) {
+    if (forward.size() == 0 || back.size() == 0 || forward.size() >= e) {
       return std::unexpected(error::component_does_not_exist);
     }
     if (forward[e] == invalid_component_index) {
@@ -116,7 +116,7 @@ template <typename C> struct component_pool {
   inline C &get_element_fast(entity e) { return data[forward[e]]; }
 
   inline bool has_component(entity e) const {
-    if (forward.size() == 0 || back.size() == 0) {
+    if (forward.size() == 0 || back.size() == 0 || forward.size() >= e) {
       return false;
     }
 
@@ -414,10 +414,7 @@ template <typename... Ccs> struct view {
 
   private:
     inline void _skip_non_matching(auto &smallest) {
-      while (_index <= smallest.back.size()) {
-        if (_index == smallest.back.size()) {
-          break;
-        }
+      while (_index < smallest.back.size()) {
         if (_has_all(smallest.back[_index])) {
           break;
         }
