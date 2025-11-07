@@ -26,7 +26,6 @@ using test_data = std::array<int, 20>;
   std::println("Adding {} entities", ENTITY_COUNT);
   auto start_total = steady_clock::now();
 
-
   // ---------------- ENTITY CREATION ----------------
   auto start_entities = steady_clock::now();
   std::vector<std::pair<entity, int>> entities;
@@ -121,7 +120,7 @@ using test_data = std::array<int, 20>;
                duration<double>(end_removal - start_removal).count());
   // ---------------- ECS VIEW ITERATION ----------------
   {
-    std::println("Testing ecs_view iteration with file output");
+    std::println("Testing ecs_view iteration");
     auto start_view = steady_clock::now();
     size_t count = 0;
     volatile float sink = 0.0f;

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
-#include <print>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -128,31 +128,30 @@ template <typename C> struct component_pool {
 } // namespace _private
 
 template <typename C> struct smart_ref {
-  smart_ref() : entity(invalid_entity), pool(nullptr) {}
+  smart_ref() : owner(invalid_entity), pool(nullptr) {}
 
-  smart_ref(_private::component_pool<C> *p, entity ent) : entity(ent), pool(p) {
-    ++pool->refcounts[pool->forward[entity]];
+  smart_ref(_private::component_pool<C> *p, entity ent) : owner(ent), pool(p) {
+    ++pool->refcounts[pool->forward[owner]];
   }
 
   ~smart_ref() {
-    if (pool && pool->has_component(entity)) {
-      auto idx = pool->forward[entity];
+    if (pool && pool->has_component(owner)) {
+      auto idx = pool->forward[owner];
       if (idx != _private::invalid_component_index) {
         --pool->refcounts[idx];
       }
     }
   }
 
-  smart_ref(const smart_ref &other) : entity(other.entity), pool(other.pool) {
-    if (pool && pool->has_component(entity)) {
-      ++pool->refcounts[pool->forward[entity]];
+  smart_ref(const smart_ref &other) : owner(other.owner), pool(other.pool) {
+    if (pool && pool->has_component(owner)) {
+      ++pool->refcounts[pool->forward[owner]];
     }
   }
 
-  smart_ref(smart_ref &&other) noexcept
-      : entity(other.entity), pool(other.pool) {
+  smart_ref(smart_ref &&other) noexcept : owner(other.owner), pool(other.pool) {
     other.pool = nullptr;
-    other.entity = invalid_entity;
+    other.owner = invalid_entity;
   }
 
   smart_ref &operator=(const smart_ref &other) {
@@ -160,9 +159,9 @@ template <typename C> struct smart_ref {
       return *this;
     this->~smart_ref();
     pool = other.pool;
-    entity = other.entity;
-    if (pool && pool->has_component(entity)) {
-      ++pool->refcounts[pool->forward[entity]];
+    owner = other.owner;
+    if (pool && pool->has_component(owner)) {
+      ++pool->refcounts[pool->forward[owner]];
     }
     return *this;
   }
@@ -171,39 +170,39 @@ template <typename C> struct smart_ref {
     if (this != &other) {
       this->~smart_ref();
       pool = other.pool;
-      entity = other.entity;
+      owner = other.owner;
       other.pool = nullptr;
-      other.entity = invalid_entity;
+      other.owner = invalid_entity;
     }
     return *this;
   }
 
   bool valid() const {
-    if (!pool || !pool->has_component(entity))
+    if (!pool || !pool->has_component(owner))
       return false;
     return true;
   }
 
   C &get() {
     assert(valid());
-    return pool->get_element_fast(entity);
+    return pool->get_element_fast(owner);
   }
 
   void release() {
-    if (pool && pool->has_component(entity)) {
-      auto idx = pool->forward[entity];
+    if (pool && pool->has_component(owner)) {
+      auto idx = pool->forward[owner];
       if (idx != _private::invalid_component_index) {
         --pool->refcounts[idx];
       }
     }
     pool = nullptr;
-    entity = invalid_entity;
+    owner = invalid_entity;
   }
 
   C *operator->() { return &get(); }
   C &operator*() { return get(); }
 
-  entity entity = invalid_entity;
+  entity owner = invalid_entity;
 
 private:
   _private::component_pool<C> *pool = nullptr;
@@ -302,13 +301,15 @@ template <typename... Cs> struct ecs {
             safety_policy saf_policy = safety_policy::unchecked,
             typename... Ccs>
   inline method_result_void_t<saf_policy> remove_components(entity e) {
-    if (std::find(_entities.cbegin(), _entities.cend(), e) ==
-        _entities.cend()) {
-      return std::unexpected(error::no_such_entity);
+    if constexpr (saf_policy == safety_policy::checked) {
+      if (std::find(_entities.cbegin(), _entities.cend(), e) ==
+          _entities.cend()) {
+        return std::unexpected(error::no_such_entity);
+      }
     }
 
     auto checked_remove =
-        []<typename C>(const _private::component_pool<C> &pool,
+        []<typename C>(_private::component_pool<C> &pool,
                        entity e) -> method_result_void_t<saf_policy> {
       if (pool.has_component(e)) {
         if constexpr (saf_policy == safety_policy::checked) {
@@ -343,7 +344,7 @@ template <typename... Cs> struct ecs {
     }
   }
 
-  inline entity add_entity() {
+  [[nodiscard]] inline entity add_entity() {
     _entities.push_back(_entity_counter++);
     return _entities.back();
   }
@@ -367,7 +368,8 @@ template <typename... Cs> struct ecs {
       }
       return {};
     } else {
-      remove_components<Cs...>(e);
+      remove_components<remove_policy::lax, safety_policy::unchecked, Cs...>(e);
+      return;
     }
   }
 
@@ -395,7 +397,7 @@ template <typename... Ccs> struct view {
 
   struct iterator {
     inline iterator(view<Ccs...> &view, size_t index)
-        : _view(view), _index(index) {
+        : _view(view), _index(index), _smallest(view._smallest_pool()) {
       _skip_non_matching();
     }
 
@@ -409,15 +411,15 @@ template <typename... Ccs> struct view {
       return _index != other._index;
     }
 
-    inline std::pair<entity, std::tuple<Ccs &...>> operator*() const {
+    inline std::pair<entity, std::tuple<Ccs &...>> operator*() {
       auto e = _first_matching();
       assert(_has_all(e) == true);
-      return {e, _view._get_components(e)};
+      return std::forward_as_tuple(e, _view._get_components(e));
     }
 
   private:
     inline void _skip_non_matching() {
-      while (_index < _view._smallest_pool()) {
+      while (_index < _smallest->size()) {
         if (_has_all(_first_matching())) {
           break;
         }
@@ -434,61 +436,45 @@ template <typename... Ccs> struct view {
       return (... && std::get<I>(_view._pools).has_component(e));
     }
 
-    entity _first_matching() const {
-      return _first_matching_impl(std::index_sequence_for<Ccs...>{});
-    }
-
-    template <size_t... Is>
-    entity _first_matching_impl(std::index_sequence<Is...>) const {
-      entity result = invalid_entity;
-
-      ((result == invalid_entity ? [&] {
-        auto& pool = std::get<Is>(_view._pools);
-        for (auto e : pool.back) {
-            if (e != invalid_entity) {
-                result = e;
-                return;
-            }
-        }
-    }() : void()), ...);
-
-      return result;
-    }
+    entity _first_matching() const { return (*_smallest)[_index]; }
 
     view<Ccs...> &_view;
     size_t _index = _private::invalid_component_index;
+    std::vector<entity> *_smallest;
   };
 
   inline iterator begin() { return iterator(*this, 0); }
-  inline iterator end() { return iterator(*this, _smallest_pool()); }
+  inline iterator end() { return iterator(*this, _smallest_pool()->size()); }
 
 private:
-  size_t _smallest_pool() {
+  std::vector<entity> *_smallest_pool() {
     return _smallest_pool_impl(std::index_sequence_for<Ccs...>{});
   }
 
   template <size_t... Is>
-  size_t _smallest_pool_impl(std::index_sequence<Is...>) {
+  std::vector<entity> *_smallest_pool_impl(std::index_sequence<Is...>) {
     constexpr size_t N = sizeof...(Is);
-    size_t sizes[N] = {std::get<Is>(_pools).back.size()...};
+    std::vector<entity> *sizes[N] = {&std::get<Is>(_pools).back...};
 
-    size_t min_size = sizes[0];
+    size_t min_size = sizes[0]->size();
+    std::vector<entity> *res = sizes[0];
     for (size_t i = 1; i < N; ++i) {
-      if (sizes[i] < min_size) {
-        min_size = sizes[i];
+      if (sizes[i]->size() < min_size) {
+        min_size = sizes[i]->size();
+        res = sizes[i];
       }
     }
-    return min_size;
+    return res;
   }
 
-  std::tuple<Ccs &...> _get_components(entity e) const {
+  std::tuple<Ccs &...> _get_components(entity e) {
     return _get_components_impl(e, std::index_sequence_for<Ccs...>{});
   }
 
   template <std::size_t... I>
   std::tuple<Ccs &...> _get_components_impl(entity e,
-                                            std::index_sequence<I...>) const {
-    return {std::get<I>(_pools).get_element_fast(e)...};
+                                            std::index_sequence<I...>) {
+    return std::forward_as_tuple(std::get<I>(_pools).get_element_fast(e)...);
   }
 
   std::tuple<_private::component_pool<Ccs> &...> _pools;
