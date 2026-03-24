@@ -390,12 +390,19 @@ private:
 };
 
 template <typename... Ccs> struct view {
+  inline constexpr static bool enable_borrowed_range = true; // potentially
+                                                             // dangerous
   view() = delete;
   template <typename... Cs>
   inline view(ecs<Cs...> &c)
       : _pools({std::get<_private::component_pool<Ccs>>(c._data)...}) {}
 
   struct iterator {
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = std::pair<entity, std::tuple<Ccs &...>>;
+    using difference_type = std::ptrdiff_t;
+    using pointer = void;
+    using reference = value_type;
     inline iterator(view<Ccs...> &view, size_t index)
         : _view(view), _index(index), _smallest(view._smallest_pool()) {
       _skip_non_matching();
@@ -409,6 +416,10 @@ template <typename... Ccs> struct view {
 
     inline bool operator!=(const iterator &other) const {
       return _index != other._index;
+    }
+
+    inline bool operator==(const iterator &other) const {
+      return _index == other._index;
     }
 
     inline std::pair<entity, std::tuple<Ccs &...>> operator*() {
